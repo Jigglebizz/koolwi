@@ -17,3 +17,4 @@
 #include "term.h"
 #include "variable.h"
 #include "version.h"
+#include "settings.h"

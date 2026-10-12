@@ -10,6 +10,7 @@ build/
 dist/
 wheelhouse/
 kiwisolver.egg-info/
+sample/
 .eggs
 .vscode
 .mypy_cache

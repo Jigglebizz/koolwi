@@ -19,6 +19,7 @@
 #include "term.h"
 #include "util.h"
 #include "variable.h"
+#include "settings.h"
 
 
 namespace kiwi
@@ -61,13 +62,42 @@ class SolverImpl
 
 public:
 
-	SolverImpl() : m_objective( new Row() ), m_id_tick( 1 ) {}
+	SolverImpl() : m_objective( new Row() ), m_id_tick( 1 )
+	{
+		const size_t varmap_sz = VarMap::GetRequiredBackingSize( g_globalSettings.m_solverVarMapSize );
+		const size_t rowmap_sz = RowMap::GetRequiredBackingSize( g_globalSettings.m_solverRowMapSize );
+		const size_t cnmap_sz  = CnMap::GetRequiredBackingSize( g_globalSettings.m_solverConstraintMapSize );
+		const size_t editmap_sz = EditMap::GetRequiredBackingSize( g_globalSettings.m_solverEditMapSize );
+
+		const size_t total_sz = varmap_sz
+		                      + rowmap_sz
+		                      + cnmap_sz
+		                      + editmap_sz;
+
+		m_dynamic_mem = g_globalSettings.m_allocFn( total_sz, "solver backing" );
+		void* cursor = m_dynamic_mem;
+
+		void* varmap_backing  = cursor; cursor = ((uint8_t*)cursor) + varmap_sz;
+		void* rowmap_backing  = cursor; cursor = ((uint8_t*)cursor) + rowmap_sz;
+		void* cnmap_backing   = cursor; cursor = ((uint8_t*)cursor) + cnmap_sz;
+		void* editmap_backing = cursor; cursor = ((uint8_t*)cursor) + editmap_sz;
+
+		if ( cursor != ((uint8_t*)m_dynamic_mem) + total_sz )
+		{
+			g_globalSettings.m_assertFn( "Allocation sizes did not match! Library programmer error.\n" );
+		}
+
+		m_vars.InitWithBacking ( varmap_backing,  g_globalSettings.m_solverVarMapSize );
+		m_rows.InitWithBacking ( rowmap_backing,  g_globalSettings.m_solverRowMapSize );
+		m_cns.InitWithBacking  ( cnmap_backing,   g_globalSettings.m_solverConstraintMapSize );
+		m_edits.InitWithBacking( editmap_backing, g_globalSettings.m_solverEditMapSize );
+	}
 
 	SolverImpl( const SolverImpl& ) = delete;
 
 	SolverImpl( SolverImpl&& ) = delete;
 
-	~SolverImpl() { clearRows(); }
+	~SolverImpl() { clearRows(); g_globalSettings.m_freeFn( m_dynamic_mem ); }
 
 	/* Add a constraint to the solver.
 
@@ -82,7 +112,7 @@ public:
 	*/
 	void addConstraint( const Constraint& constraint )
 	{
-		if( m_cns.find( constraint ) != m_cns.end() )
+		if( m_cns.Contains( constraint ) )
 			throw DuplicateConstraint( constraint );
 
 		// Creating a row causes symbols to be reserved for the variables
@@ -121,10 +151,24 @@ public:
 		{
 			rowptr->solveFor( subject );
 			substitute( subject, *rowptr );
-			m_rows[ subject ] = rowptr.release();
+			if ( m_rows.Contains( subject ) )
+			{
+				*m_rows.At( subject ) = rowptr.release();
+			}
+			else
+			{
+				m_rows.Insert( subject, rowptr.release() );
+			}
 		}
 
-		m_cns[ constraint ] = tag;
+		if ( m_cns.Contains( constraint ) )
+		{
+			*m_cns.At( constraint ) = tag;
+		}
+		else
+		{
+			m_cns.Insert( constraint, tag );
+		}
 
 		// Optimizing after each constraint is added performs less
 		// aggregate work due to a smaller average system size. It
@@ -142,12 +186,12 @@ public:
 	*/
 	void removeConstraint( const Constraint& constraint )
 	{
-		auto cn_it = m_cns.find( constraint );
-		if( cn_it == m_cns.end() )
+		auto cn_it = m_cns.At( constraint );
+		if( cn_it == nullptr )
 			throw UnknownConstraint( constraint );
 
-		Tag tag( cn_it->second );
-		m_cns.erase( cn_it );
+		Tag tag( *cn_it );
+		m_cns.Remove( constraint );
 
 		// Remove the error effects from the objective function
 		// *before* pivoting, or substitutions into the objective
@@ -156,20 +200,20 @@ public:
 
 		// If the marker is basic, simply drop the row. Otherwise,
 		// pivot the marker into the basis and then drop the row.
-		auto row_it = m_rows.find( tag.marker );
-		if( row_it != m_rows.end() )
+		auto row_it = m_rows.At( tag.marker );
+		if( row_it != nullptr )
 		{
-			std::unique_ptr<Row> rowptr( row_it->second );
-			m_rows.erase( row_it );
+			std::unique_ptr<Row> rowptr( *row_it );
+			m_rows.Remove( tag.marker );
 		}
 		else
 		{
 			row_it = getMarkerLeavingRow( tag.marker );
-			if( row_it == m_rows.end() )
+			if( row_it == nullptr )
 				throw InternalSolverError( "failed to find leaving row" );
-			Symbol leaving( row_it->first );
-			std::unique_ptr<Row> rowptr( row_it->second );
-			m_rows.erase( row_it );
+			Symbol leaving( tag.marker );
+			std::unique_ptr<Row> rowptr( *row_it );
+			m_rows.Remove( tag.marker );
 			rowptr->solveFor( leaving, tag.marker );
 			substitute( tag.marker, *rowptr );
 		}
@@ -185,7 +229,7 @@ public:
 	*/
 	bool hasConstraint( const Constraint& constraint ) const
 	{
-		return m_cns.find( constraint ) != m_cns.end();
+		return m_cns.Contains( constraint );
 	}
 
 	/* Add an edit variable to the solver.
@@ -204,7 +248,7 @@ public:
 	*/
 	void addEditVariable( const Variable& variable, double strength )
 	{
-		if( m_edits.find( variable ) != m_edits.end() )
+		if( m_edits.Contains( variable ) )
 			throw DuplicateEditVariable( variable );
 		strength = strength::clip( strength );
 		if( strength == strength::required )
@@ -212,10 +256,10 @@ public:
 		Constraint cn( Expression( variable ), OP_EQ, strength );
 		addConstraint( cn );
 		EditInfo info;
-		info.tag = m_cns[ cn ];
+		info.tag = *m_cns.At( cn );
 		info.constraint = cn;
 		info.constant = 0.0;
-		m_edits[ variable ] = info;
+		m_edits.Insert( variable, info );
 	}
 
 	/* Remove an edit variable from the solver.
@@ -228,11 +272,11 @@ public:
 	*/
 	void removeEditVariable( const Variable& variable )
 	{
-		auto it = m_edits.find( variable );
-		if( it == m_edits.end() )
+		auto it = m_edits.At( variable );
+		if( it == nullptr )
 			throw UnknownEditVariable( variable );
-		removeConstraint( it->second.constraint );
-		m_edits.erase( it );
+		removeConstraint( it->constraint );
+		m_edits.Remove( variable );
 	}
 
 	/* Test whether an edit variable has been added to the solver.
@@ -240,7 +284,7 @@ public:
 	*/
 	bool hasEditVariable( const Variable& variable ) const
 	{
-		return m_edits.find( variable ) != m_edits.end();
+		return m_edits.Contains( variable );
 	}
 
 	/* Suggest a value for the given edit variable.
@@ -256,30 +300,29 @@ public:
 	*/
 	void suggestValue( const Variable& variable, double value )
 	{
-		auto it = m_edits.find( variable );
-		if( it == m_edits.end() )
+		auto it = m_edits.At( variable );
+		if( it == nullptr )
 			throw UnknownEditVariable( variable );
 
 		DualOptimizeGuard guard( *this );
-		EditInfo& info = it->second;
+		EditInfo& info = *it;
 		double delta = value - info.constant;
 		info.constant = value;
 
 		// Check first if the positive error variable is basic.
-		auto row_it = m_rows.find( info.tag.marker );
-		if( row_it != m_rows.end() )
+		auto row_it = m_rows.At( info.tag.marker );
+		if( row_it != nullptr )
 		{
-			if( row_it->second->add( -delta ) < 0.0 )
-				m_infeasible_rows.push_back( row_it->first );
+			if( (*row_it)->add( -delta ) < 0.0 )
+				m_infeasible_rows.push_back( info.tag.marker );
 			return;
 		}
 
 		// Check next if the negative error variable is basic.
-		row_it = m_rows.find( info.tag.other );
-		if( row_it != m_rows.end() )
+		if( row_it = m_rows.At( info.tag.other ) )
 		{
-			if( row_it->second->add( delta ) < 0.0 )
-				m_infeasible_rows.push_back( row_it->first );
+			if( (*row_it)->add( delta ) < 0.0 )
+				m_infeasible_rows.push_back( info.tag.other );
 			return;
 		}
 
@@ -299,16 +342,14 @@ public:
 	*/
 	void updateVariables()
 	{
-		auto row_end = m_rows.end();
-
 		for (auto &varPair : m_vars)
 		{
 			Variable& var = varPair.first;
-			auto row_it = m_rows.find( varPair.second );
-			if( row_it == row_end )
+			auto row_it = m_rows.At( varPair.second );
+			if( row_it == nullptr )
 				var.setValue( 0.0 );
 			else
-				var.setValue( row_it->second->constant() );
+				var.setValue( (*row_it)->constant() );
 		}
 	}
 
@@ -324,9 +365,9 @@ public:
 	void reset()
 	{
 		clearRows();
-		m_cns.clear();
-		m_vars.clear();
-		m_edits.clear();
+		m_cns.Clear();
+		m_vars.Clear();
+		m_edits.Clear();
 		m_infeasible_rows.clear();
 		m_objective.reset( new Row() );
 		m_artificial.reset();
@@ -348,7 +389,7 @@ private:
 	void clearRows()
 	{
 		std::for_each( m_rows.begin(), m_rows.end(), RowDeleter() );
-		m_rows.clear();
+		m_rows.Clear();
 	}
 
 	/* Get the symbol for the given variable.
@@ -358,11 +399,10 @@ private:
 	*/
 	Symbol getVarSymbol( const Variable& variable )
 	{
-		auto it = m_vars.find( variable );
-		if( it != m_vars.end() )
-			return it->second;
+		if ( auto it = m_vars.At( variable ) )
+			return *it;
 		Symbol symbol( Symbol::External, m_id_tick++ );
-		m_vars[ variable ] = symbol;
+		m_vars.Insert( variable, symbol );
 		return symbol;
 	}
 
@@ -394,9 +434,8 @@ private:
 			if( !nearZero( term.coefficient() ) )
 			{
 				Symbol symbol( getVarSymbol( term.variable() ) );
-				auto row_it = m_rows.find( symbol );
-				if( row_it != m_rows.end() )
-					row->insert( *row_it->second, term.coefficient() );
+				if( auto row_it = m_rows.At( symbol ) )
+					row->insert( **row_it, term.coefficient() );
 				else
 					row->insert( symbol, term.coefficient() );
 			}
@@ -494,7 +533,7 @@ private:
  	{
 		// Create and add the artificial variable to the tableau
 		Symbol art( Symbol::Slack, m_id_tick++ );
-		m_rows[ art ] = new Row( row );
+		m_rows.Insert( art, new Row( row ) );
 		m_artificial.reset( new Row( row ) );
 
 		// Optimize the artificial objective. This is successful
@@ -505,19 +544,25 @@ private:
 
 		// If the artificial variable is not basic, pivot the row so that
 		// it becomes basic. If the row is constant, exit early.
-		auto it = m_rows.find( art );
-		if( it != m_rows.end() )
+		if( auto it = m_rows.At( art ) )
 		{
-			std::unique_ptr<Row> rowptr( it->second );
-			m_rows.erase( it );
-			if( rowptr->cells().empty() )
+			std::unique_ptr<Row> rowptr( *it );
+			m_rows.Remove( art );
+			if( rowptr->cells().IsEmpty() )
 				return success;
 			Symbol entering( anyPivotableSymbol( *rowptr ) );
 			if( entering.type() == Symbol::Invalid )
 				return false;  // unsatisfiable (will this ever happen?)
 			rowptr->solveFor( art, entering );
 			substitute( entering, *rowptr );
-			m_rows[ entering ] = rowptr.release();
+			if ( m_rows.Contains( entering ) )
+			{
+				*m_rows.At( entering ) = rowptr.release();
+			}
+			else
+			{
+				m_rows.Insert( entering, rowptr.release() );
+			}
 		}
 
 		// Remove the artificial variable from the tableau.
@@ -572,10 +617,10 @@ private:
 			// pivot the entering symbol into the basis
 			Symbol leaving( it->first );
 			Row* row = it->second;
-			m_rows.erase( it );
+			m_rows.Remove( entering );
 			row->solveFor( leaving, entering );
 			substitute( entering, *row );
-			m_rows[ entering ] = row;
+			*m_rows.At( entering ) = row; // #potentially needs check
 		}
 	}
 
@@ -599,19 +644,26 @@ private:
 
 			Symbol leaving( m_infeasible_rows.back() );
 			m_infeasible_rows.pop_back();
-			auto it = m_rows.find( leaving );
-			if( it != m_rows.end() && !nearZero( it->second->constant() ) &&
-				it->second->constant() < 0.0 )
+			auto it = m_rows.At( leaving );
+			if( it != nullptr && !nearZero( (*it)->constant() ) &&
+				(*it)->constant() < 0.0 )
 			{
-				Symbol entering( getDualEnteringSymbol( *it->second ) );
+				Symbol entering( getDualEnteringSymbol( **it ) );
 				if( entering.type() == Symbol::Invalid )
 					throw InternalSolverError( "Dual optimize failed." );
 				// pivot the entering symbol into the basis
-				Row* row = it->second;
-				m_rows.erase( it );
+				Row* row = *it;
+				m_rows.Remove( leaving );
 				row->solveFor( leaving, entering );
 				substitute( entering, *row );
-				m_rows[ entering ] = row;
+				if ( m_rows.Contains( entering ) )
+				{
+					*m_rows.At( entering ) = row;
+				}
+				else
+				{
+					m_rows.Insert( entering, row );
+				}
 			}
 		}
 	}
@@ -730,7 +782,7 @@ private:
 	the marker *should* exist somewhere in the tableau.
 
 	*/
-	RowMap::iterator getMarkerLeavingRow( const Symbol& marker )
+	Row** getMarkerLeavingRow( const Symbol& marker )
 	{
 		const double dmax = std::numeric_limits<double>::max();
 		double r1 = dmax;
@@ -768,10 +820,10 @@ private:
 			}
 		}
 		if( first != end )
-			return first;
+			return &first->second;
 		if( second != end )
-			return second;
-		return third;
+			return &second->second;
+		return &third->second;
 	}
 
 	/* Remove the effects of a constraint on the objective function.
@@ -790,9 +842,8 @@ private:
 	*/
 	void removeMarkerEffects( const Symbol& marker, double strength )
 	{
-		auto row_it = m_rows.find( marker );
-		if( row_it != m_rows.end() )
-			m_objective->insert( *row_it->second, -strength );
+		if( auto row_it = m_rows.At( marker ) )
+			m_objective->insert( **row_it, -strength );
 		else
 			m_objective->insert( marker, -strength );
 	}
@@ -810,6 +861,7 @@ private:
 		return true;
 	}
 
+	void* m_dynamic_mem;
 	CnMap m_cns;
 	RowMap m_rows;
 	VarMap m_vars;

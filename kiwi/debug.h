@@ -75,7 +75,7 @@ public:
     {
         for (const auto &varPair : vars)
         {
-            out << varPair.first.name() << " = ";
+            out << varPair.first.debugName() << " = ";
             dump(varPair.second, out);
             out << std::endl;
         }
@@ -90,7 +90,7 @@ public:
     static void dump(const SolverImpl::EditMap &edits, std::ostream &out)
     {
         for (const auto &editPair : edits)
-            out << editPair.first.name() << std::endl;
+            out << editPair.first.debugName() << std::endl;
     }
 
     static void dump(const Row &row, std::ostream &out)
@@ -133,7 +133,7 @@ public:
         for (const auto &term : cn.expression().terms())
         {
             out << term.coefficient() << " * ";
-            out << term.variable().name() << " + ";
+            out << term.variable().debugName() << " + ";
         }
         out << cn.expression().constant();
         switch (cn.op())

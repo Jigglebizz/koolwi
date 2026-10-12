@@ -28,7 +28,7 @@ enum RelationalOperator
 
 class Constraint
 {
-
+friend struct std::hash<kiwi::Constraint>;
 public:
     Constraint() = default;
 
@@ -138,3 +138,15 @@ private:
 };
 
 } // namespace kiwi
+
+namespace std
+{
+	template <>
+	struct hash<kiwi::Constraint>
+	{
+		std::size_t operator()( const kiwi::Constraint& c ) const
+		{
+			return (std::size_t)c.m_data.data();
+		}
+	};
+}

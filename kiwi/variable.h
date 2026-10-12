@@ -15,20 +15,9 @@ namespace kiwi
 
 class Variable
 {
-
+friend struct std::hash<kiwi::Variable>;
 public:
-    class Context
-    {
-    public:
-        Context() = default;
-        virtual ~Context() {} // LCOV_EXCL_LINE
-    };
-
-    Variable(Context *context = 0) : m_data(new VariableData("", context)) {}
-
-    Variable(std::string name, Context *context = 0) : m_data(new VariableData(std::move(name), context)) {}
-
-    Variable(const char *name, Context *context = 0) : m_data(new VariableData(name, context)) {}
+    Variable(const char* debug_name = nullptr, uint64_t cookie = 0) : m_data(new VariableData(debug_name, cookie)) {}
 
     Variable(const Variable&) = default;
 
@@ -36,29 +25,24 @@ public:
 
     ~Variable() = default;
 
-    const std::string &name() const
+    const char* debugName() const
     {
-        return m_data->m_name;
+        return m_data->m_debugName;
     }
 
-    void setName(const char *name)
+    void setDebugName(const char *debug_name)
     {
-        m_data->m_name = name;
+        m_data->m_debugName = debug_name;
     }
 
-    void setName(const std::string &name)
+    uint64_t cookie() const
     {
-        m_data->m_name = name;
+        return m_data->m_cookie;
     }
 
-    Context *context() const
+    void setContext(uint64_t cookie)
     {
-        return m_data->m_context.get();
-    }
-
-    void setContext(Context *context)
-    {
-        m_data->m_context.reset(context);
+        m_data->m_cookie = cookie;
     }
 
     double value() const
@@ -86,21 +70,16 @@ private:
     {
 
     public:
-        VariableData(std::string name, Context *context) : SharedData(),
-                                                                  m_name(std::move(name)),
-                                                                  m_context(context),
-                                                                  m_value(0.0) {}
-
-        VariableData(const char *name, Context *context) : SharedData(),
-                                                           m_name(name),
-                                                           m_context(context),
+        VariableData(const char* debug_name, uint64_t cookie) : SharedData(),
+                                                           m_debugName( debug_name),
+                                                           m_cookie(cookie),
                                                            m_value(0.0) {}
 
         ~VariableData() = default;
 
-        std::string m_name;
-        std::unique_ptr<Context> m_context;
-        double m_value;
+        const char* m_debugName;
+        uint64_t    m_cookie;
+        double      m_value;
 
     private:
         VariableData(const VariableData &other);
@@ -117,3 +96,15 @@ private:
 };
 
 } // namespace kiwi
+
+namespace std
+{
+	template <>
+	struct hash<kiwi::Variable>
+	{
+		std::size_t operator()( const kiwi::Variable& v ) const
+		{
+			return (std::size_t)v.m_data.data();
+		}
+	};
+}

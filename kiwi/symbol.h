@@ -66,3 +66,15 @@ private:
 } // namespace impl
 
 } // namespace kiwi
+
+namespace std
+{
+	template <>
+	struct hash<kiwi::impl::Symbol>
+	{
+		std::size_t operator()( const kiwi::impl::Symbol& s ) const
+		{
+			return (std::size_t)s.id();
+		}
+	};
+}

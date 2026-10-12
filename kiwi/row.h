@@ -9,6 +9,7 @@
 #include "maptype.h"
 #include "symbol.h"
 #include "util.h"
+#include "settings.h"
 
 namespace kiwi
 {
@@ -22,9 +23,19 @@ class Row
 public:
     using CellMap = MapType<Symbol, double>;
 
-    Row() : Row(0.0) {}
+    Row() : Row(0.0)
+    {
+        const size_t cells_sz = CellMap::GetRequiredBackingSize( g_globalSettings.m_rowLength );
+        m_dynamic_mem = g_globalSettings.m_allocFn( cells_sz, "row cellmap" );
+        m_cells.InitWithBacking( m_dynamic_mem, g_globalSettings.m_rowLength );
+    }
 
-    Row(double constant) : m_constant(constant) {}
+    Row(double constant) : m_constant(constant)
+    {
+        const size_t cells_sz = CellMap::GetRequiredBackingSize( g_globalSettings.m_rowLength );
+        m_dynamic_mem = g_globalSettings.m_allocFn( cells_sz, "row cellmap" );
+        m_cells.InitWithBacking( m_dynamic_mem, g_globalSettings.m_rowLength );
+    }
 
     Row(const Row &other) {
         m_constant = other.m_constant;
@@ -52,7 +63,10 @@ public:
         return *this;
     }
 
-    ~Row() = default;
+    ~Row()
+    {
+      g_globalSettings.m_freeFn( m_dynamic_mem );
+    }
 
     const CellMap &cells() const
     {
@@ -83,8 +97,11 @@ public:
 	*/
     void insert(const Symbol &symbol, double coefficient = 1.0)
     {
-        if (nearZero(m_cells[symbol] += coefficient))
-            m_cells.erase(symbol);
+        if ( m_cells.Contains(symbol) == false)
+            m_cells.Insert( symbol, 0.0 );
+
+        if (nearZero(*m_cells.At(symbol) += coefficient))
+            m_cells.Remove(symbol);
     }
 
     /* Insert a row into this row with a given coefficient.
@@ -100,9 +117,12 @@ public:
 
         for (const auto & cellPair : other.m_cells)
         {
+            if ( m_cells.Contains( cellPair.first ) == false )
+                m_cells.Insert( cellPair.first, 0.0 );
+
             double coeff = cellPair.second * coefficient;
-            if (nearZero(m_cells[cellPair.first] += coeff))
-                m_cells.erase(cellPair.first);
+            if (nearZero(*m_cells.At(cellPair.first) += coeff))
+                m_cells.Remove(cellPair.first);
         }
     }
 
@@ -111,9 +131,9 @@ public:
 	*/
     void remove(const Symbol &symbol)
     {
-        auto it = m_cells.find(symbol);
-        if (it != m_cells.end())
-            m_cells.erase(it);
+        auto it = m_cells.At(symbol);
+        if (it != nullptr)
+            m_cells.Remove(symbol);
     }
 
     /* Reverse the sign of the constant and all cells in the row.
@@ -139,8 +159,8 @@ public:
 	*/
     void solveFor(const Symbol &symbol)
     {
-        double coeff = -1.0 / m_cells[symbol];
-        m_cells.erase(symbol);
+        double coeff = -1.0 / (*m_cells.At(symbol));
+        m_cells.Remove(symbol);
         m_constant *= coeff;
         for (auto &cellPair : m_cells)
             cellPair.second *= coeff;
@@ -170,10 +190,10 @@ public:
 	*/
     double coefficientFor(const Symbol &symbol) const
     {
-        CellMap::const_iterator it = m_cells.find(symbol);
-        if (it == m_cells.end())
+        const double* it = m_cells.At(symbol);
+        if (it == nullptr)
             return 0.0;
-        return it->second;
+        return *it;
     }
 
     /* Substitute a symbol with the data from another row.
@@ -187,16 +207,17 @@ public:
 	*/
     void substitute(const Symbol &symbol, const Row &row)
     {
-        auto it = m_cells.find(symbol);
-        if (it != m_cells.end())
+        const double* it = m_cells.At(symbol);
+        if (it != nullptr)
         {
-            double coefficient = it->second;
-            m_cells.erase(it);
+            double coefficient = *it;
+            m_cells.Remove(symbol);
             insert(row, coefficient);
         }
     }
 
 private:
+    void* m_dynamic_mem;
     CellMap m_cells;
     double m_constant;
 };
