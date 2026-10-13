@@ -11,7 +11,6 @@
 #include <memory>
 #include <vector>
 #include "constraint.h"
-#include "errors.h"
 #include "expression.h"
 #include "maptype.h"
 #include "row.h"
