@@ -62,14 +62,16 @@ class SolverImpl
 
 public:
 
-	SolverImpl() : m_objective( new Row() ), m_id_tick( 1 )
+	SolverImpl() : m_id_tick( 1 )
 	{
+		const size_t row_sz    = sizeof( Row );
 		const size_t varmap_sz = VarMap::GetRequiredBackingSize( g_globalSettings.m_solverVarMapSize );
 		const size_t rowmap_sz = RowMap::GetRequiredBackingSize( g_globalSettings.m_solverRowMapSize );
 		const size_t cnmap_sz  = CnMap::GetRequiredBackingSize( g_globalSettings.m_solverConstraintMapSize );
 		const size_t editmap_sz = EditMap::GetRequiredBackingSize( g_globalSettings.m_solverEditMapSize );
 
-		const size_t total_sz = varmap_sz
+		const size_t total_sz = row_sz
+		                      + varmap_sz
 		                      + rowmap_sz
 		                      + cnmap_sz
 		                      + editmap_sz;
@@ -77,16 +79,19 @@ public:
 		m_dynamic_mem = g_globalSettings.m_allocFn( total_sz, "solver backing" );
 		void* cursor = m_dynamic_mem;
 
-		void* varmap_backing  = cursor; cursor = ((uint8_t*)cursor) + varmap_sz;
-		void* rowmap_backing  = cursor; cursor = ((uint8_t*)cursor) + rowmap_sz;
-		void* cnmap_backing   = cursor; cursor = ((uint8_t*)cursor) + cnmap_sz;
-		void* editmap_backing = cursor; cursor = ((uint8_t*)cursor) + editmap_sz;
+		Row*  row_backing     = (Row*)cursor; cursor = ((uint8_t*)cursor) + row_sz;
+		void* varmap_backing  =       cursor; cursor = ((uint8_t*)cursor) + varmap_sz;
+		void* rowmap_backing  =       cursor; cursor = ((uint8_t*)cursor) + rowmap_sz;
+		void* cnmap_backing   =       cursor; cursor = ((uint8_t*)cursor) + cnmap_sz;
+		void* editmap_backing =       cursor; cursor = ((uint8_t*)cursor) + editmap_sz;
 
 		if ( cursor != ((uint8_t*)m_dynamic_mem) + total_sz )
 		{
 			g_globalSettings.m_assertFn( "Allocation sizes did not match! Library programmer error.\n" );
 		}
 
+		new (row_backing) Row();
+		m_objective.reset( row_backing );
 		m_vars.InitWithBacking ( varmap_backing,  g_globalSettings.m_solverVarMapSize );
 		m_rows.InitWithBacking ( rowmap_backing,  g_globalSettings.m_solverRowMapSize );
 		m_cns.InitWithBacking  ( cnmap_backing,   g_globalSettings.m_solverConstraintMapSize );
@@ -97,7 +102,7 @@ public:
 
 	SolverImpl( SolverImpl&& ) = delete;
 
-	~SolverImpl() { clearRows(); g_globalSettings.m_freeFn( m_dynamic_mem ); }
+	~SolverImpl() { clearRows(); m_objective.release(); g_globalSettings.m_freeFn( m_dynamic_mem ); }
 
 	/* Add a constraint to the solver.
 
@@ -113,7 +118,7 @@ public:
 	void addConstraint( const Constraint& constraint )
 	{
 		if( m_cns.Contains( constraint ) )
-			throw DuplicateConstraint( constraint );
+			g_globalSettings.m_assertFn( "Duplicate Constraint!" );
 
 		// Creating a row causes symbols to be reserved for the variables
 		// in the constraint. If this method exits with an exception,
@@ -134,7 +139,7 @@ public:
 		if( subject.type() == Symbol::Invalid && allDummies( *rowptr ) )
 		{
 			if( !nearZero( rowptr->constant() ) )
-				throw UnsatisfiableConstraint( constraint );
+				g_globalSettings.m_assertFn( "The constraint can not be satisfied." );
 			else
 				subject = tag.marker;
 		}
@@ -145,7 +150,7 @@ public:
 		if( subject.type() == Symbol::Invalid )
 		{
 			if( !addWithArtificialVariable( *rowptr ) )
-				throw UnsatisfiableConstraint( constraint );
+				g_globalSettings.m_assertFn( "The constraint can not be satisfied." );
 		}
 		else
 		{
@@ -188,7 +193,7 @@ public:
 	{
 		auto cn_it = m_cns.At( constraint );
 		if( cn_it == nullptr )
-			throw UnknownConstraint( constraint );
+			g_globalSettings.m_assertFn( "The constraint has not been added to the solver." );
 
 		Tag tag( *cn_it );
 		m_cns.Remove( constraint );
@@ -210,7 +215,7 @@ public:
 		{
 			row_it = getMarkerLeavingRow( tag.marker );
 			if( row_it == nullptr )
-				throw InternalSolverError( "failed to find leaving row" );
+				g_globalSettings.m_assertFn( "An internal solver error occurred: failed to find leaving row" );
 			Symbol leaving( tag.marker );
 			std::unique_ptr<Row> rowptr( *row_it );
 			m_rows.Remove( tag.marker );
@@ -249,10 +254,10 @@ public:
 	void addEditVariable( const Variable& variable, double strength )
 	{
 		if( m_edits.Contains( variable ) )
-			throw DuplicateEditVariable( variable );
+			g_globalSettings.m_assertFn( "The edit variable has already been added to the solver." );
 		strength = strength::clip( strength );
 		if( strength == strength::required )
-			throw BadRequiredStrength();
+			g_globalSettings.m_assertFn( "A required strength cannot be used in this context." );
 		Constraint cn( Expression( variable ), OP_EQ, strength );
 		addConstraint( cn );
 		EditInfo info;
@@ -274,7 +279,7 @@ public:
 	{
 		auto it = m_edits.At( variable );
 		if( it == nullptr )
-			throw UnknownEditVariable( variable );
+			g_globalSettings.m_assertFn( "The edit variable has not been added to the solver." );
 		removeConstraint( it->constraint );
 		m_edits.Remove( variable );
 	}
@@ -302,7 +307,7 @@ public:
 	{
 		auto it = m_edits.At( variable );
 		if( it == nullptr )
-			throw UnknownEditVariable( variable );
+			g_globalSettings.m_assertFn( "The edit variable has not been added to the solver." );
 
 		DualOptimizeGuard guard( *this );
 		EditInfo& info = *it;
@@ -369,7 +374,7 @@ public:
 		m_vars.Clear();
 		m_edits.Clear();
 		m_infeasible_rows.clear();
-		m_objective.reset( new Row() );
+		m_objective->reset();
 		m_artificial.reset();
 		m_id_tick = 1;
 	}
@@ -383,7 +388,7 @@ private:
 	struct RowDeleter
 	{
 		template<typename T>
-		void operator()( T& pair ) { delete pair.second; }
+		void operator()( T& pair ) { pair.second->~Row(); }
 	};
 
 	void clearRows()
@@ -426,7 +431,9 @@ private:
 	std::unique_ptr<Row> createRow( const Constraint& constraint, Tag& tag )
 	{
 		const Expression& expr( constraint.expression() );
-		std::unique_ptr<Row> row( new Row( expr.constant() ) );
+		Row* new_row = (Row*)g_globalSettings.m_allocFn( sizeof( *new_row ), "solver create new rowd" );
+		new (new_row) Row( expr.constant() );
+		std::unique_ptr<Row> row( new_row );
 
 		// Substitute the current basic variables into the row.
 		for (const auto &term : expr.terms())
@@ -613,7 +620,7 @@ private:
 				return;
 			auto it = getLeavingRow( entering );
 			if( it == m_rows.end() )
-				throw InternalSolverError( "The objective is unbounded." );
+				g_globalSettings.m_assertFn( "An internal solver error occurred: The objective is unbounded." );
 			// pivot the entering symbol into the basis
 			Symbol leaving( it->first );
 			Row* row = it->second;
@@ -650,7 +657,7 @@ private:
 			{
 				Symbol entering( getDualEnteringSymbol( **it ) );
 				if( entering.type() == Symbol::Invalid )
-					throw InternalSolverError( "Dual optimize failed." );
+					g_globalSettings.m_assertFn( "An internal solver error occurred: Dual optimize failed." );
 				// pivot the entering symbol into the basis
 				Row* row = *it;
 				m_rows.Remove( leaving );

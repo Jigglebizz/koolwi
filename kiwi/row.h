@@ -38,11 +38,13 @@ public:
     }
 
     Row(const Row &other) {
+        std::cout << "Copying a hashmap!" << std::endl;
         m_constant = other.m_constant;
         m_cells = other.m_cells;
     }
 
     Row(Row &&other) noexcept {
+        std::cout << "Moving a hashmap!" << std::endl;
         m_constant = other.m_constant;
         m_cells = std::move(other.m_cells);
     }
@@ -216,6 +218,11 @@ public:
         }
     }
 
+    void reset()
+    {
+        m_cells.Clear();
+        m_constant = 0.f;
+    }
 private:
     void* m_dynamic_mem;
     CellMap m_cells;
