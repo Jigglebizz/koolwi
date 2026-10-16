@@ -539,8 +539,13 @@ private:
  	{
 		// Create and add the artificial variable to the tableau
 		Symbol art( Symbol::Slack, m_id_tick++ );
-		m_rows.Insert( art, new Row( row ) );
-		m_artificial.reset( new Row( row ) );
+		Row* row_copy_1 = (Row*)g_globalSettings.m_allocFn( sizeof( *row_copy_1 ), "artificial variable row, row copy" );
+		new (row_copy_1) Row( row );
+		m_rows.Insert( art, row_copy_1 );
+
+		Row* row_copy_2 = (Row*)g_globalSettings.m_allocFn( sizeof( *row_copy_2 ), "artificial variable row copy" );
+		new ( row_copy_2 ) Row( row );
+		m_artificial.reset( row_copy_2 );
 
 		// Optimize the artificial objective. This is successful
 		// only if the artificial objective is optimized to zero.
